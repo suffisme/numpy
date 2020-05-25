@@ -3,6 +3,7 @@ import warnings
 import sys
 import decimal
 from fractions import Fraction
+import math
 import pytest
 
 import numpy as np
@@ -1221,6 +1222,16 @@ class TestExtins:
         assert_array_equal(a, ac)
 
 
+# _foo1 and _foo2 are used in some tests in TestVectorize.
+
+def _foo1(x, y=1.0):
+    return y*math.floor(x)
+
+
+def _foo2(x, y=1.0, z=0.0):
+    return y*math.floor(x) + z
+
+
 class TestVectorize:
 
     def test_simple(self):
@@ -1252,7 +1263,6 @@ class TestVectorize:
         assert_array_equal(y, x)
 
     def test_ufunc(self):
-        import math
         f = vectorize(math.cos)
         args = np.array([0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 2 * np.pi])
         r1 = f(args)
@@ -1272,6 +1282,63 @@ class TestVectorize:
         r1 = f(args, 2)
         r2 = np.array([3, 4, 5])
         assert_array_equal(r1, r2)
+
+    def test_keywords_with_otypes_order1(self):
+        # gh-1620: The second call of f would crash with
+        # `ValueError: invalid number of arguments`.
+        f = vectorize(_foo1, otypes=[float])
+        # We're testing the caching of ufuncs by vectorize, so the order
+        # of these function calls is an important part of the test.
+        r1 = f(np.arange(3.0), 1.0)
+        r2 = f(np.arange(3.0))
+        assert_array_equal(r1, r2)
+
+    def test_keywords_with_otypes_order2(self):
+        # gh-1620: The second call of f would crash with
+        # `ValueError: non-broadcastable output operand with shape ()
+        # doesn't match the broadcast shape (3,)`.
+        f = vectorize(_foo1, otypes=[float])
+        # We're testing the caching of ufuncs by vectorize, so the order
+        # of these function calls is an important part of the test.
+        r1 = f(np.arange(3.0))
+        r2 = f(np.arange(3.0), 1.0)
+        assert_array_equal(r1, r2)
+
+    def test_keywords_with_otypes_order3(self):
+        # gh-1620: The third call of f would crash with
+        # `ValueError: invalid number of arguments`.
+        f = vectorize(_foo1, otypes=[float])
+        # We're testing the caching of ufuncs by vectorize, so the order
+        # of these function calls is an important part of the test.
+        r1 = f(np.arange(3.0))
+        r2 = f(np.arange(3.0), y=1.0)
+        r3 = f(np.arange(3.0))
+        assert_array_equal(r1, r2)
+        assert_array_equal(r1, r3)
+
+    def test_keywords_with_otypes_several_kwd_args1(self):
+        # gh-1620 Make sure different uses of keyword arguments
+        # don't break the vectorized function.
+        f = vectorize(_foo2, otypes=[float])
+        # We're testing the caching of ufuncs by vectorize, so the order
+        # of these function calls is an important part of the test.
+        r1 = f(10.4, z=100)
+        r2 = f(10.4, y=-1)
+        r3 = f(10.4)
+        assert_equal(r1, _foo2(10.4, z=100))
+        assert_equal(r2, _foo2(10.4, y=-1))
+        assert_equal(r3, _foo2(10.4))
+
+    def test_keywords_with_otypes_several_kwd_args2(self):
+        # gh-1620 Make sure different uses of keyword arguments
+        # don't break the vectorized function.
+        f = vectorize(_foo2, otypes=[float])
+        # We're testing the caching of ufuncs by vectorize, so the order
+        # of these function calls is an important part of the test.
+        r1 = f(z=100, x=10.4, y=-1)
+        r2 = f(1, 2, 3)
+        assert_equal(r1, _foo2(z=100, x=10.4, y=-1))
+        assert_equal(r2, _foo2(1, 2, 3))
 
     def test_keywords_no_func_code(self):
         # This needs to test a function that has keywords but
@@ -2356,6 +2423,15 @@ class TestBincount:
         assert_equal(sys.getrefcount(np.dtype(np.intp)), intp_refcount)
         assert_equal(sys.getrefcount(np.dtype(np.double)), double_refcount)
 
+    @pytest.mark.parametrize("vals", [[[2, 2]], 2])
+    def test_error_not_1d(self, vals):
+        # Test that values has to be 1-D (both as array and nested list)
+        vals_arr = np.asarray(vals)
+        with assert_raises(ValueError):
+            np.bincount(vals_arr)
+        with assert_raises(ValueError):
+            np.bincount(vals)
+
 
 class TestInterp:
 
@@ -3283,11 +3359,49 @@ class TestAdd_newdoc:
     @pytest.mark.skipif(sys.flags.optimize == 2, reason="Python running -OO")
     @pytest.mark.xfail(IS_PYPY, reason="PyPy does not modify tp_doc")
     def test_add_doc(self):
-        # test np.add_newdoc
+        # test that np.add_newdoc did attach a docstring successfully:
         tgt = "Current flat index into the array."
         assert_equal(np.core.flatiter.index.__doc__[:len(tgt)], tgt)
         assert_(len(np.core.ufunc.identity.__doc__) > 300)
         assert_(len(np.lib.index_tricks.mgrid.__doc__) > 300)
+
+    @pytest.mark.skipif(sys.flags.optimize == 2, reason="Python running -OO")
+    def test_errors_are_ignored(self):
+        prev_doc = np.core.flatiter.index.__doc__
+        # nothing changed, but error ignored, this should probably
+        # give a warning (or even error) in the future.
+        np.add_newdoc("numpy.core", "flatiter", ("index", "bad docstring"))
+        assert prev_doc == np.core.flatiter.index.__doc__
+
+
+class TestAddDocstring():
+    # Test should possibly be moved, but it also fits to be close to
+    # the newdoc tests...
+    @pytest.mark.skipif(sys.flags.optimize == 2, reason="Python running -OO")
+    @pytest.mark.skipif(IS_PYPY, reason="PyPy does not modify tp_doc")
+    def test_add_same_docstring(self):
+        # test for attributes (which are C-level defined)
+        np.add_docstring(np.ndarray.flat, np.ndarray.flat.__doc__)
+        # And typical functions:
+        def func():
+            """docstring"""
+            return
+
+        np.add_docstring(func, func.__doc__)
+
+    @pytest.mark.skipif(sys.flags.optimize == 2, reason="Python running -OO")
+    def test_different_docstring_fails(self):
+        # test for attributes (which are C-level defined)
+        with assert_raises(RuntimeError):
+            np.add_docstring(np.ndarray.flat, "different docstring")
+        # And typical functions:
+        def func():
+            """docstring"""
+            return
+
+        with assert_raises(RuntimeError):
+            np.add_docstring(func, "different docstring")
+
 
 class TestSortComplex:
 

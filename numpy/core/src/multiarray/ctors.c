@@ -21,7 +21,6 @@
 #include "shape.h"
 #include "npy_buffer.h"
 #include "lowlevel_strided_loops.h"
-#include "methods.h"
 #include "_datetime.h"
 #include "datetime_strings.h"
 #include "array_assign.h"
@@ -484,6 +483,8 @@ setArrayFromSequence(PyArrayObject *a, PyObject *s,
     /* INCREF on entry DECREF on exit */
     Py_INCREF(s);
 
+    PyObject *seq = NULL;
+
     if (PyArray_Check(s)) {
         if (!(PyArray_CheckExact(s))) {
             /*
@@ -530,10 +531,11 @@ setArrayFromSequence(PyArrayObject *a, PyObject *s,
         return 0;
     }
 
-    slen = PySequence_Length(s);
-    if (slen < 0) {
+    seq = PySequence_Fast(s, "Could not convert object to sequence");
+    if (seq == NULL) {
         goto fail;
     }
+    slen = PySequence_Fast_GET_SIZE(seq);
 
     /*
      * Either the dimensions match, or the sequence has length 1 and can
@@ -548,13 +550,8 @@ setArrayFromSequence(PyArrayObject *a, PyObject *s,
 
     /* Broadcast the one element from the sequence to all the outputs */
     if (slen == 1) {
-        PyObject *o;
+        PyObject *o = PySequence_Fast_GET_ITEM(seq, 0);
         npy_intp alen = PyArray_DIM(a, dim);
-
-        o = PySequence_GetItem(s, 0);
-        if (o == NULL) {
-            goto fail;
-        }
 
         for (i = 0; i < alen; i++) {
             if ((PyArray_NDIM(a) - dim) > 1) {
@@ -572,26 +569,18 @@ setArrayFromSequence(PyArrayObject *a, PyObject *s,
                 res = PyArray_SETITEM(dst, b, o);
             }
             if (res < 0) {
-                Py_DECREF(o);
                 goto fail;
             }
         }
-        Py_DECREF(o);
     }
     /* Copy element by element */
     else {
-        PyObject * seq;
-        seq = PySequence_Fast(s, "Could not convert object to sequence");
-        if (seq == NULL) {
-            goto fail;
-        }
         for (i = 0; i < slen; i++) {
             PyObject * o = PySequence_Fast_GET_ITEM(seq, i);
             if ((PyArray_NDIM(a) - dim) > 1) {
                 PyArrayObject * tmp =
                     (PyArrayObject *)array_item_asarray(dst, i);
                 if (tmp == NULL) {
-                    Py_DECREF(seq);
                     goto fail;
                 }
 
@@ -603,17 +592,17 @@ setArrayFromSequence(PyArrayObject *a, PyObject *s,
                 res = PyArray_SETITEM(dst, b, o);
             }
             if (res < 0) {
-                Py_DECREF(seq);
                 goto fail;
             }
         }
-        Py_DECREF(seq);
     }
 
+    Py_DECREF(seq);
     Py_DECREF(s);
     return 0;
 
  fail:
+    Py_XDECREF(seq);
     Py_DECREF(s);
     return res;
 }
@@ -2040,12 +2029,14 @@ PyArray_FromAny(PyObject *op, PyArray_Descr *newtype, int min_depth,
             PyErr_SetString(PyExc_ValueError,
                             "object of too small depth for desired array");
             Py_DECREF(arr);
+            Py_XDECREF(newtype);
             ret = NULL;
         }
         else if (max_depth != 0 && PyArray_NDIM(arr) > max_depth) {
             PyErr_SetString(PyExc_ValueError,
                             "object too deep for desired array");
             Py_DECREF(arr);
+            Py_XDECREF(newtype);
             ret = NULL;
         }
         else {
@@ -2181,41 +2172,9 @@ PyArray_FromArray(PyArrayObject *arr, PyArray_Descr *newtype, int flags)
 
     /* Raise an error if the casting rule isn't followed */
     if (!PyArray_CanCastArrayTo(arr, newtype, casting)) {
-        PyObject *errmsg;
-        PyArray_Descr *arr_descr = NULL;
-        PyObject *arr_descr_repr = NULL;
-        PyObject *newtype_repr = NULL;
-
         PyErr_Clear();
-        errmsg = PyUString_FromString("Cannot cast array data from ");
-        arr_descr = PyArray_DESCR(arr);
-        if (arr_descr == NULL) {
-            Py_DECREF(newtype);
-            Py_DECREF(errmsg);
-            return NULL;
-        }
-        arr_descr_repr = PyObject_Repr((PyObject *)arr_descr);
-        if (arr_descr_repr == NULL) {
-            Py_DECREF(newtype);
-            Py_DECREF(errmsg);
-            return NULL;
-        }
-        PyUString_ConcatAndDel(&errmsg, arr_descr_repr);
-        PyUString_ConcatAndDel(&errmsg,
-                PyUString_FromString(" to "));
-        newtype_repr = PyObject_Repr((PyObject *)newtype);
-        if (newtype_repr == NULL) {
-            Py_DECREF(newtype);
-            Py_DECREF(errmsg);
-            return NULL;
-        }
-        PyUString_ConcatAndDel(&errmsg, newtype_repr);
-        PyUString_ConcatAndDel(&errmsg,
-                PyUString_FromFormat(" according to the rule %s",
-                        npy_casting_to_string(casting)));
-        PyErr_SetObject(PyExc_TypeError, errmsg);
-        Py_DECREF(errmsg);
-
+        npy_set_invalid_cast_error(
+                PyArray_DESCR(arr), newtype, casting, PyArray_NDIM(arr) == 0);
         Py_DECREF(newtype);
         return NULL;
     }
